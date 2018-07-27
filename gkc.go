@@ -56,15 +56,34 @@ type ConsumerConfig struct {
 	Broker string
 
 	// Defines the logic after processing the kafka message
-	MessageHook actionHook
+	MessageHook Hook
 
 	// Defines the logic after processing the failed kafka message from DLQ
-	ErrorHook actionHook
+	ErrorHook Hook
+
+	// Enable prometheus metrics
+	EnableMetrics bool
 
 	// Prometheus address to export metrics on
 	Address string
-	// port    string
+}
 
+// type Hook interface{
+// 	Action func(*Message) error
+// }
+
+type Hook interface {
+	Execute(*Message) error
+}
+
+func NewHookFunc(h HookFunc) Hook {
+	return h
+}
+
+type HookFunc func(*Message) error
+
+func (h HookFunc) Execute(m *Message) error {
+	return h(m)
 }
 
 type (
@@ -72,8 +91,6 @@ type (
 	// partitionMap struct {
 	// 	partitions map[int32]*partitionConsumer
 	// }
-
-	actionHook func(*Message) error
 
 	Message struct {
 		*kafka.Message
@@ -90,11 +107,15 @@ type (
 		doneC     chan struct{}
 		dlq       chan *Message
 		counter   Counter
-		promAddr  string
+
+		// Prometheus handler for metrics
+		enableMetrics  bool
+		promAddr       string
+		promHttpServer *http.Server
 
 		// This function defines the logic after processing a kafka message
-		msgHook actionHook
-		errHook actionHook
+		msgHook Hook
+		errHook Hook
 
 		// Logger
 		logger *log.Logger // Custom logger instance.
@@ -130,19 +151,20 @@ func newConsumerImp(
 	counter Counter,
 ) *consumerImpl {
 	return &consumerImpl{
-		groupName: config.GroupName,
-		topics:    config.Topics,
-		consumer:  consumer,
-		options:   opt,
-		msgHook:   config.MessageHook,
-		errHook:   config.ErrorHook,
-		stopC:     make(chan struct{}),
-		doneC:     make(chan struct{}),
-		msgCh:     make(chan *Message, 10),
-		dlq:       make(chan *Message, 10),
-		counter:   counter,
-		promAddr:  config.Address,
-		logger:    log.New(os.Stderr, "", log.LstdFlags),
+		groupName:     config.GroupName,
+		topics:        config.Topics,
+		consumer:      consumer,
+		options:       opt,
+		msgHook:       config.MessageHook,
+		errHook:       config.ErrorHook,
+		stopC:         make(chan struct{}),
+		doneC:         make(chan struct{}),
+		msgCh:         make(chan *Message, 10),
+		dlq:           make(chan *Message, 10),
+		logger:        log.New(os.Stderr, "", log.LstdFlags),
+		counter:       counter,
+		enableMetrics: config.EnableMetrics,
+		promAddr:      config.Address,
 	}
 }
 
@@ -153,14 +175,16 @@ func (c *consumerImpl) Start() error {
 	go c.commitLoop()
 	go c.dlqLoop()
 
-	c.exposeMetrics()
+	if c.enableMetrics {
+		c.recordMetrics()
+	}
 
 	return nil
 }
 
 func (c *consumerImpl) Stop() error {
 	close(c.stopC)
-	return nil
+	return c.promHttpServer.Shutdown(nil)
 }
 
 func (c *consumerImpl) eventLoop() {
@@ -209,7 +233,7 @@ func (c *consumerImpl) deliverLoop() {
 	for {
 		select {
 		case msg := <-c.msgCh:
-			err := c.msgHook(msg)
+			err := c.msgHook.Execute(msg)
 			if err != nil {
 				c.logger.Println("received from channel", err)
 				c.dlq <- msg
@@ -237,15 +261,19 @@ func (c *consumerImpl) dlqLoop() {
 		case <-c.stopC:
 			return
 		case msg := <-c.dlq:
-			c.errHook(msg)
+			c.errHook.Execute(msg)
 		}
 	}
 }
 
-func (c *consumerImpl) exposeMetrics() {
+func (c *consumerImpl) recordMetrics() {
+	c.promHttpServer = &http.Server{Addr: c.promAddr}
+	http.Handle("/metrics", promhttp.Handler())
 	go func() {
-		http.Handle("/metrics", promhttp.Handler())
-		http.ListenAndServe(c.promAddr, nil)
+		if err := c.promHttpServer.ListenAndServe(); err != nil {
+			// cannot panic, because this probably is an intentional close
+			c.logger.Printf("Http prometheus server: ListenAndServe() error: %s", err)
+		}
 	}()
 }
 
