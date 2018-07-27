@@ -14,7 +14,6 @@ var (
 	DefaultOptions         = Options{}
 	DefaultMetricNamespace = "metrics"
 	DefaultMetricSubsystem = "gkc"
-	DefaultMetricKeys      = []string{"error"}
 )
 
 type Options struct {
@@ -41,6 +40,8 @@ type Consumer interface {
 	// Messages return the message channel for this consumer
 	// Messages() <-chan Message
 	Messages() <-chan *Message
+
+	DisableLog()
 }
 
 type ConsumerConfig struct {
@@ -62,7 +63,7 @@ type ConsumerConfig struct {
 	ErrorHook Hook
 
 	// Enable prometheus metrics
-	EnableMetrics bool
+	ExposeMetrics bool
 
 	// Prometheus address to export metrics on
 	Address string
@@ -109,7 +110,7 @@ type (
 		counter   Counter
 
 		// Prometheus handler for metrics
-		enableMetrics  bool
+		exposeMetrics  bool
 		promAddr       string
 		promHttpServer *http.Server
 
@@ -163,7 +164,7 @@ func newConsumerImp(
 		dlq:           make(chan *Message, 10),
 		logger:        log.New(os.Stderr, "", log.LstdFlags),
 		counter:       counter,
-		enableMetrics: config.EnableMetrics,
+		exposeMetrics: config.ExposeMetrics,
 		promAddr:      config.Address,
 	}
 }
@@ -175,7 +176,7 @@ func (c *consumerImpl) Start() error {
 	go c.commitLoop()
 	go c.dlqLoop()
 
-	if c.enableMetrics {
+	if c.exposeMetrics {
 		c.recordMetrics()
 	}
 
@@ -206,6 +207,7 @@ func (c *consumerImpl) eventLoop() {
 				c.logger.Printf("%% Message on %s:\n%s\n",
 					e.TopicPartition, string(e.Value))
 				c.processMessage(e)
+				c.counter.UpdateTotal(1)
 
 			case kafka.PartitionEOF:
 				c.logger.Printf("%% Reached %v\n", e)
@@ -233,11 +235,15 @@ func (c *consumerImpl) deliverLoop() {
 	for {
 		select {
 		case msg := <-c.msgCh:
+			start := time.Now()
 			err := c.msgHook.Execute(msg)
 			if err != nil {
 				c.logger.Println("received from channel", err)
 				c.dlq <- msg
+			} else {
+				c.counter.UpdateSuccess(1)
 			}
+			c.counter.UpdateLatency(time.Since(start))
 
 		case <-c.stopC:
 			return
@@ -312,7 +318,7 @@ func NewConsumer(config *ConsumerConfig) (Consumer, error) {
 	counter := NewCounter(
 		DefaultMetricNamespace,
 		DefaultMetricSubsystem,
-		DefaultMetricKeys)
+	)
 
 	// These hooks are metric funcs which will log to aero
 	// add this to consumer config
