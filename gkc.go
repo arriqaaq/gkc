@@ -55,7 +55,10 @@ type ConsumerConfig struct {
 	Broker string
 
 	// Defines the logic after processing the kafka message
-	Hook actionHook
+	MessageHook actionHook
+
+	// Defines the logic after processing the failed kafka message from DLQ
+	ErrorHook actionHook
 
 	// Prometheus address to export metrics on
 	Address string
@@ -89,7 +92,8 @@ type (
 		promAddr  string
 
 		// This function defines the logic after processing a kafka message
-		postHook actionHook
+		msgHook actionHook
+		errHook actionHook
 	}
 )
 
@@ -125,7 +129,8 @@ func newConsumerImp(
 		topics:    config.Topics,
 		consumer:  consumer,
 		options:   opt,
-		postHook:  config.Hook,
+		msgHook:   config.MessageHook,
+		errHook:   config.ErrorHook,
 		stopC:     make(chan struct{}),
 		doneC:     make(chan struct{}),
 		msgCh:     make(chan *Message, 10),
@@ -198,7 +203,7 @@ func (c *consumerImpl) deliverLoop() {
 	for {
 		select {
 		case msg := <-c.msgCh:
-			err := c.postHook(msg)
+			err := c.msgHook(msg)
 			if err != nil {
 				fmt.Println("received from channel", err)
 				c.dlq <- msg
@@ -225,6 +230,8 @@ func (c *consumerImpl) dlqLoop() {
 		select {
 		case <-c.stopC:
 			return
+		case msg := <-c.dlq:
+			c.errHook(msg)
 		}
 	}
 }
