@@ -14,6 +14,7 @@ var (
 	DefaultOptions         = Options{}
 	DefaultMetricNamespace = "metrics"
 	DefaultMetricSubsystem = "gkc"
+	DefaultChannelSize     = 2000
 )
 
 type Options struct {
@@ -105,7 +106,7 @@ type (
 		msgCh     chan *Message
 		options   *Options
 		stopC     chan struct{}
-		doneC     chan struct{}
+		doneC     chan bool
 		dlq       chan *Message
 		counter   Counter
 
@@ -159,9 +160,9 @@ func newConsumerImp(
 		msgHook:       config.MessageHook,
 		errHook:       config.ErrorHook,
 		stopC:         make(chan struct{}),
-		doneC:         make(chan struct{}),
-		msgCh:         make(chan *Message, 2000),
-		dlq:           make(chan *Message, 2000),
+		doneC:         make(chan bool, DefaultChannelSize),
+		msgCh:         make(chan *Message, DefaultChannelSize),
+		dlq:           make(chan *Message, DefaultChannelSize),
 		logger:        log.New(os.Stderr, "", log.LstdFlags),
 		counter:       counter,
 		exposeMetrics: config.ExposeMetrics,
@@ -240,8 +241,10 @@ func (c *consumerImpl) deliverLoop() {
 			if err != nil {
 				c.logger.Println("received from channel", err)
 				c.dlq <- msg
+				c.doneC <- false
 			} else {
 				c.counter.UpdateSuccess(1)
+				c.doneC <- true
 			}
 			c.counter.UpdateLatency(time.Since(start))
 
@@ -255,6 +258,8 @@ func (c *consumerImpl) deliverLoop() {
 func (c *consumerImpl) commitLoop() {
 	for {
 		select {
+		case <-c.doneC:
+			c.consumer.Commit()
 		case <-c.stopC:
 			return
 		}
@@ -296,7 +301,7 @@ func DefaultConfluentConfig(config *ConsumerConfig) *kafka.ConfigMap {
 		"session.timeout.ms":              6000,
 		"go.events.channel.enable":        true,
 		"go.application.rebalance.enable": true,
-		"go.events.channel.size":          2000,
+		"go.events.channel.size":          DefaultChannelSize,
 		"default.topic.config": kafka.ConfigMap{
 			"auto.offset.reset": "latest",
 		},
