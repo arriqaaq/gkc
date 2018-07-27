@@ -1,9 +1,10 @@
 package gkc
 
 import (
-	"fmt"
 	"github.com/confluentinc/confluent-kafka-go/kafka"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"io/ioutil"
+	"log"
 	"net/http"
 	"os"
 	"time"
@@ -94,6 +95,10 @@ type (
 		// This function defines the logic after processing a kafka message
 		msgHook actionHook
 		errHook actionHook
+
+		// Logger
+		logger *log.Logger // Custom logger instance.
+
 	}
 )
 
@@ -137,6 +142,7 @@ func newConsumerImp(
 		dlq:       make(chan *Message, 10),
 		counter:   counter,
 		promAddr:  config.Address,
+		logger:    log.New(os.Stderr, "", log.LstdFlags),
 	}
 }
 
@@ -165,23 +171,23 @@ func (c *consumerImpl) eventLoop() {
 			switch e := ev.(type) {
 
 			case kafka.AssignedPartitions:
-				fmt.Fprintf(os.Stderr, "%% %v\n", e)
+				c.logger.Printf("%% %v\n", e)
 				c.consumer.Assign(e.Partitions)
 
 			case kafka.RevokedPartitions:
-				fmt.Fprintf(os.Stderr, "%% %v\n", e)
+				c.logger.Printf("%% %v\n", e)
 				c.consumer.Unassign()
 
 			case *kafka.Message:
-				// fmt.Printf("%% Message on %s:\n%s\n",
-				// 	e.TopicPartition, string(e.Value))
+				c.logger.Printf("%% Message on %s:\n%s\n",
+					e.TopicPartition, string(e.Value))
 				c.processMessage(e)
 
-			// case kafka.PartitionEOF:
-			// 	fmt.Printf("%% Reached %v\n", e)
+			case kafka.PartitionEOF:
+				c.logger.Printf("%% Reached %v\n", e)
 
 			case kafka.Error:
-				fmt.Fprintf(os.Stderr, "%% Error: %v\n", e)
+				c.logger.Printf("%% Error: %v\n", e)
 			}
 		case <-c.stopC:
 			return
@@ -205,7 +211,7 @@ func (c *consumerImpl) deliverLoop() {
 		case msg := <-c.msgCh:
 			err := c.msgHook(msg)
 			if err != nil {
-				fmt.Println("received from channel", err)
+				c.logger.Println("received from channel", err)
 				c.dlq <- msg
 			}
 
@@ -241,6 +247,11 @@ func (c *consumerImpl) exposeMetrics() {
 		http.Handle("/metrics", promhttp.Handler())
 		http.ListenAndServe(c.promAddr, nil)
 	}()
+}
+
+func (c *consumerImpl) DisableLog() {
+	c.logger.SetFlags(0)
+	c.logger.SetOutput(ioutil.Discard)
 }
 
 func DefaultConfluentConfig(config *ConsumerConfig) *kafka.ConfigMap {
