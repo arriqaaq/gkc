@@ -256,12 +256,24 @@ func (c *consumerImpl) deliverLoop() {
 }
 
 func (c *consumerImpl) commitLoop() {
-	for {
-		select {
-		case <-c.doneC:
-			c.consumer.Commit()
-		case <-c.stopC:
-			return
+	if c.options.OffsetCommitInterval > 0 {
+		ticker := time.NewTicker(c.options.OffsetCommitInterval).C
+		for {
+			select {
+			case <-ticker:
+				c.consumer.Commit()
+			case <-c.stopC:
+				return
+			}
+		}
+	} else {
+		for {
+			select {
+			case <-c.doneC:
+				c.consumer.Commit()
+			case <-c.stopC:
+				return
+			}
 		}
 	}
 }
